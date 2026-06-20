@@ -1,0 +1,29 @@
+{
+  "app": {
+    "name": "My Awsome Application",
+    "description": "This app help users to manege there tasks efficently.",
+    "version": "1.0.0",
+    "author": "John Doe"
+  },
+  "ui": {
+    "welcome_message": "Welcom to the dashbord! Pleese login to contineu.",
+    "error_message": "An eror has occured. Plese try agian later.",
+    "success_message": "Your changes has been saved successfully.",
+    "tooltip": "Click hear to lern more about this feture."
+  },
+  "email": {
+    "subject": "Acount Verifycation Required",
+    "body": "Dear Costumer, thankyou for registring. Plese verifiy your email adress by clicking the link bellow.",
+    "footer": "You recieved this email because you sigend up for our servise."
+  },
+  "notifications": [
+    "New mesage recieved from your frend.",
+    "Your subscrption will expier in 3 days.",
+    "Plese update you're profle informaton."
+  ],
+  "settings": {
+    "language": "en",
+    "timezone": "UTC",
+    "privacy_note": "We valuee your privasy and will never shere your data with thrid partys."
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "device": {
+    "hostname": "core-ruter-01",
+    "description": "Primary core ruter for datacenter segmant A",
+    "vendor": "Cisco",
+    "model": "Catalyst 9500",
+    "status": "The deivce is currantly aktive and forewarding packats normaly."
+  },
+  "interfaces": [
+    {
+      "name": "GigabitEthernet0/0/1",
+      "description": "Uplink to boarder firewal",
+      "ip_address": "192.168.1.1",
+      "notes": "Konfiguerd with OSPF area 0 for dynaimc routeing redistrebution."
+    },
+    {
+      "name": "GigabitEthernet0/0/2",
+      "description": "Conection to acces layer swich",
+      "ip_address": "10.0.0.1",
+      "notes": "Trunking enabled with VLANs 10, 20 and 30 for segragation of trafic."
+    }
+  ],
+  "protocols": {
+    "bgp": {
+      "status": "BGP sesion estabilshed with upstream ISP peer.",
+      "notes": "Advertiseing defualt rout via BGP to all nighbor peers in AS 65001."
+    },
+    "ospf": {
+      "status": "OSPF adjecency is up on all configerd interfases.",
+      "notes": "Redistributeing static routs into OSPF for propergation across the netwerk."
+    },
+    "mpls": {
+      "status": "MPLS labal switching is enabeled on core interfases.",
+      "notes": "LDP sesions are estabilshed with all adjasent PE routers in the MPLS doamin."
+    }
+  },
+  "security": {
+    "firewall": {
+      "policy": "Inbound ACL is appyed to deny unautherised acess from untrusted subnets.",
+      "notes": "IPsec tunnnel is configerd for sight-to-sight VPN with the DR datacenter."
+    },
+    "tls": {
+      "version": "TLS 1.3",
+      "notes": "All managment trafic is encripted using TLS 1.3 to prevent eaves-dropping."
+    }
+  },
+  "monitoring": {
+    "snmp": {
+      "status": "SNMP v3 is konfiguerd for securre pollling of devce metriks.",
+      "notes": "Traps are forwared to the NMS for reeal-time alart procesing."
+    },
+    "syslog": {
+      "server": "10.0.1.50",
+      "notes": "Syslog mesages are sentto the centralized log agragator for auditting and complianse."
+    }
+  }
+}

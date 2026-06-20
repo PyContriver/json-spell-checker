@@ -1,0 +1,6 @@
+pyspellchecker>=0.8.0
+requests>=2.31.0
+rich>=13.0.0
+streamlit>=1.35.0
+PyGithub>=2.3.0
+python-gitlab>=4.4.0

@@ -1,0 +1,18 @@
+services:
+
+  app:
+    build: .
+    container_name: json-spell-checker
+    ports:
+      - "8501:8501"   # Streamlit UI
+      - "11434:11434" # Ollama API (optional — expose if you want to hit it from the host)
+    environment:
+      # Change this to pull a different model on first start
+      - OLLAMA_MODEL=mistral:7b
+    volumes:
+      # Persists pulled models across container restarts (avoids re-downloading)
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
