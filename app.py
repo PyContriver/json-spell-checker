@@ -14,7 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from spellchecker import SpellChecker
 
 from src.utils.spell import spell_check
-from src.utils.llm import ollama_check, _filter_llm_result, check_ollama, OLLAMA_BASE_URL
+from src.utils.llm import (ollama_check, _filter_llm_result, check_ollama,
+                           warmup_model, OLLAMA_BASE_URL, OLLAMA_TIMEOUT, OLLAMA_MAX_RETRIES)
 from src.utils.io import extract_strings, load_ignore_words, load_json_files_from_dir
 from src.utils.git import fetch_json_files, list_branches
 from src.utils.logger import get_logger
@@ -176,6 +177,22 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Parallel Workers**")
     workers = st.slider("LLM workers", min_value=1, max_value=12, value=4, label_visibility="collapsed")
+
+    st.markdown("---")
+    st.markdown("**LLM Timeout (seconds)**")
+    llm_timeout = st.number_input(
+        "Timeout per request",
+        min_value=30, max_value=600, value=OLLAMA_TIMEOUT, step=30,
+        label_visibility="collapsed",
+        help="Increase if you see timeout errors. Each retry uses the same timeout.",
+    )
+    st.markdown("**Retries on Timeout**")
+    llm_retries = st.number_input(
+        "Retries",
+        min_value=0, max_value=5, value=OLLAMA_MAX_RETRIES, step=1,
+        label_visibility="collapsed",
+        help="Number of times to retry a timed-out request before marking it as failed.",
+    )
     st.markdown("---")
 
     # Run status indicator — always visible in sidebar
@@ -197,11 +214,12 @@ with st.sidebar:
 # Helper: LLM background worker
 # ---------------------------------------------------------------------------
 
-def _llm_worker(tasks, model, base_url, ignore_words, results, stop_event, n_workers, counter):
+def _llm_worker(tasks, model, base_url, ignore_words, results, stop_event, n_workers, counter,
+                timeout=180, max_retries=2):
     """Runs in a background thread. Writes results into shared dict."""
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {
-            executor.submit(ollama_check, model, text, base_url, ignore_words): (name, field)
+            executor.submit(ollama_check, model, text, base_url, ignore_words, timeout, max_retries): (name, field)
             for name, field, text in tasks
         }
         for future in as_completed(futures):
@@ -317,10 +335,11 @@ def _render_single_row(row: dict) -> None:
 
     icon = "🔴" if has_issues else "🟢"
     badges = ""
-    if s_issues:                       badges += '<span class="badge badge-spell">Spell</span> '
-    if l_result.get("has_issues"):     badges += '<span class="badge badge-llm">LLM</span> '
-    if "error" in l_result:            badges += '<span class="badge badge-err">LLM Error</span> '
-    if not has_issues:                 badges += '<span class="badge badge-ok">OK</span>'
+    if s_issues:                        badges += '<span class="badge badge-spell">Spell</span> '
+    if l_result.get("has_issues"):      badges += '<span class="badge badge-llm">LLM</span> '
+    if l_result.get("skipped"):         badges += '<span class="badge" style="background:#451a03;color:#fcd34d">Skipped</span> '
+    elif "error" in l_result:           badges += '<span class="badge badge-err">LLM Error</span> '
+    if not has_issues and not l_result.get("skipped"): badges += '<span class="badge badge-ok">OK</span>'
 
     header = f"""<div class="field-header">
       <span>{icon}</span>
@@ -345,7 +364,9 @@ def _render_single_row(row: dict) -> None:
                   <thead><tr><th>Misspelled</th><th>Suggestions</th></tr></thead>
                   <tbody>{rows_html}</tbody></table>""", unsafe_allow_html=True)
 
-            if "error" in l_result:
+            if l_result.get("skipped"):
+                st.caption(f"⏭ LLM skipped: {l_result.get('reason', 'timeout')}")
+            elif "error" in l_result:
                 st.error(f"LLM error: {l_result['error']}")
             elif l_result.get("has_issues") and l_result.get("issues"):
                 st.markdown("**🤖 LLM Analysis**")
@@ -379,9 +400,17 @@ def _render_results(ctx: dict) -> None:
     file_map      = ctx["file_map"]
     per_file_rows = ctx["per_file_rows"]
     all_rows      = ctx["all_rows"]
-    grand_flagged = ctx["grand_flagged"]
-    grand_total   = ctx["grand_total"]
-    ignore_words  = ctx.get("ignore_words", set())
+    grand_flagged  = ctx["grand_flagged"]
+    grand_skipped  = ctx.get("grand_skipped", 0)
+    grand_total    = ctx["grand_total"]
+    ignore_words   = ctx.get("ignore_words", set())
+
+    skipped_card = (
+        f'<div class="stat-card total" style="border-color:#854d0e">'
+        f'<div class="label" style="color:#fbbf24">⏭ LLM Skipped</div>'
+        f'<div class="value" style="color:#fbbf24">{grand_skipped}</div></div>'
+        if grand_skipped else ""
+    )
 
     st.markdown(f"""
     <div class="stat-grid">
@@ -392,8 +421,11 @@ def _render_results(ctx: dict) -> None:
       <div class="stat-card flagged"><div class="label">⚠ Flagged</div>
         <div class="value">{grand_flagged}</div></div>
       <div class="stat-card clean"><div class="label">✓ Clean</div>
-        <div class="value">{grand_total - grand_flagged}</div></div>
+        <div class="value">{grand_total - grand_flagged - grand_skipped}</div></div>
+      {skipped_card}
     </div>""", unsafe_allow_html=True)
+    if grand_skipped:
+        st.caption(f"⏭ {grand_skipped} field(s) skipped by LLM due to timeout — spell check results still shown for those.")
 
     if ignore_words:
         st.caption(f"Ignoring {len(ignore_words)} word(s): {', '.join(sorted(ignore_words))}")
@@ -423,15 +455,19 @@ def _build_context(file_map, file_entries, spell_results, llm_results, ignore_wo
     per_file_rows: dict[str, list] = {}
     all_rows: list[dict] = []
 
+    grand_skipped = 0
     for name, entries in file_entries.items():
         rows = []
         for field, text in entries:
-            s_issues  = spell_results.get(name, {}).get(field, [])
-            l_result  = llm_results.get(name, {}).get(field, {})
-            llm_bad   = l_result.get("has_issues", False) or "error" in l_result
-            has_issues = bool(s_issues) or llm_bad
+            s_issues   = spell_results.get(name, {}).get(field, [])
+            l_result   = llm_results.get(name, {}).get(field, {})
+            llm_skipped = l_result.get("skipped", False)
+            llm_bad    = l_result.get("has_issues", False) or ("error" in l_result and not llm_skipped)
+            has_issues  = bool(s_issues) or llm_bad
             if has_issues:
                 grand_flagged += 1
+            if llm_skipped:
+                grand_skipped += 1
             rows.append({"path": field, "text": text,
                          "s_issues": s_issues, "l_result": l_result, "has_issues": has_issues})
             all_rows.append({"file": name, "path": field, "value": text,
@@ -441,7 +477,8 @@ def _build_context(file_map, file_entries, spell_results, llm_results, ignore_wo
     return {
         "file_map": file_map, "file_entries": file_entries,
         "per_file_rows": per_file_rows, "all_rows": all_rows,
-        "grand_flagged": grand_flagged, "grand_total": sum(len(e) for e in file_entries.values()),
+        "grand_flagged": grand_flagged, "grand_skipped": grand_skipped,
+        "grand_total": sum(len(e) for e in file_entries.values()),
         "ignore_words": ignore_words,
     }
 
@@ -546,6 +583,8 @@ with tab_checker:
                 "no_spellcheck":  no_spellcheck,
                 "ignore_raw":     ignore_raw,
                 "workers":        workers,
+                "llm_timeout":    llm_timeout,
+                "llm_retries":    llm_retries,
             }
             st.session_state.run_phase = "spell"
             st.rerun()
@@ -568,6 +607,8 @@ with tab_checker:
         no_spellcheck   = p.get("no_spellcheck", False)
         ignore_raw      = p.get("ignore_raw", "")
         workers         = p.get("workers", 4)
+        llm_timeout     = p.get("llm_timeout", OLLAMA_TIMEOUT)
+        llm_retries     = p.get("llm_retries", OLLAMA_MAX_RETRIES)
 
         file_map: dict = {}
 
@@ -667,10 +708,18 @@ with tab_checker:
         }
 
         if selected_model:
+            with st.spinner(f"⏳ Loading `{selected_model}` into memory — this can take up to 2 min on first load…"):
+                ok, warm_err = warmup_model(selected_model, OLLAMA_BASE_URL, llm_timeout)
+            if not ok:
+                log.warning("Warm-up timed out — proceeding anyway: %s", warm_err)
+                st.warning(f"⚠ Model warm-up timed out — proceeding anyway. "
+                           f"First few fields may be slow. ({warm_err})")
+
             thread = threading.Thread(
                 target=_llm_worker,
                 args=(all_tasks, selected_model, OLLAMA_BASE_URL, ignore_words,
-                      llm_results_shared, stop_event, workers, progress_counter),
+                      llm_results_shared, stop_event, workers, progress_counter,
+                      llm_timeout, llm_retries),
                 daemon=True,
             )
             thread.start()

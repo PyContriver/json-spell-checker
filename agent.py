@@ -21,7 +21,7 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
 
 from src.utils.spell import spell_check
-from src.utils.llm import ollama_list_models, ollama_check, _filter_llm_result, check_ollama, OLLAMA_BASE_URL
+from src.utils.llm import ollama_list_models, ollama_check, _filter_llm_result, check_ollama, warmup_model, OLLAMA_BASE_URL
 from src.utils.io import extract_strings, load_ignore_words
 from src.utils.logger import get_logger
 
@@ -265,8 +265,19 @@ def main() -> None:
                 spell_results[file_path][field] = spell_check(checker, text, ignore_words)
                 prog.advance(task)
 
-    # --- Pass 2: Ollama — all entries across all files in parallel ---
+    # --- Pass 2: Ollama — warm up model first, then run in parallel ---
     if args.model:
+        with Progress(
+            SpinnerColumn(), TextColumn("{task.description}"),
+            console=console, transient=True,
+        ) as warm_prog:
+            warm_prog.add_task(f"Loading '{args.model}' into memory…")
+            ok, warm_err = warmup_model(args.model, args.ollama_url)
+        if not ok:
+            console.print(f"[yellow]⚠  Warm-up timed out — proceeding anyway.[/yellow] {warm_err}")
+        else:
+            console.print(f"[green]✔[/green] Model '{args.model}' loaded and ready.")
+
         with Progress(
             SpinnerColumn(), TextColumn("{task.description}"),
             BarColumn(), MofNCompleteColumn(),

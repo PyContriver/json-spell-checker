@@ -10,7 +10,9 @@ log = get_logger(__name__)
 # Overridable via OLLAMA_BASE_URL env var.
 # Defaults to localhost — works both locally and inside the Docker container
 # (since Ollama runs in the same container via entrypoint.sh).
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL     = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_TIMEOUT      = int(os.environ.get("OLLAMA_TIMEOUT", "300"))   # seconds per request
+OLLAMA_MAX_RETRIES  = int(os.environ.get("OLLAMA_MAX_RETRIES", "2"))  # retry on timeout
 
 _LLM_SYSTEM = """\
 You are a precise spelling and grammar checker with deep knowledge of computer networking \
@@ -103,11 +105,19 @@ def ollama_check(
     text: str,
     base_url: str = OLLAMA_BASE_URL,
     ignore: set[str] | None = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
 ) -> dict:
     """
-    Send text to Ollama for spell/grammar review.
+    Send text to Ollama for spell/grammar review with retry on timeout.
     Returns a parsed result dict or {"error": "..."} on failure.
+
+    timeout     : per-request timeout in seconds (default: OLLAMA_TIMEOUT env / 180s)
+    max_retries : number of retry attempts on timeout (default: OLLAMA_MAX_RETRIES env / 2)
     """
+    _timeout     = timeout     if timeout     is not None else OLLAMA_TIMEOUT
+    _max_retries = max_retries if max_retries is not None else OLLAMA_MAX_RETRIES
+
     system = _LLM_SYSTEM
     if ignore:
         word_list = ", ".join(sorted(ignore))
@@ -125,36 +135,93 @@ def ollama_check(
             {"role": "user",   "content": f'Text: """{text}"""'},
         ],
     }
-    log.debug("LLM check: model=%s text_len=%d", model, len(text))
+
+    log.debug("LLM check: model=%s text_len=%d timeout=%ds retries=%d",
+              model, len(text), _timeout, _max_retries)
+
+    for attempt in range(1, _max_retries + 2):   # +2: first try + retries
+        try:
+            r = requests.post(f"{base_url}/api/chat", json=payload, timeout=_timeout)
+            r.raise_for_status()
+            raw    = r.json()["message"]["content"].strip()
+            result = json.loads(raw)
+            log.debug("LLM result (attempt %d): has_issues=%s issues=%d",
+                      attempt, result.get("has_issues"), len(result.get("issues", [])))
+            return result
+
+        except requests.exceptions.Timeout:
+            if attempt <= _max_retries:
+                wait = attempt * 2   # simple backoff: 2s, 4s, …
+                log.warning("Ollama timeout on attempt %d/%d — retrying in %ds",
+                            attempt, _max_retries + 1, wait)
+                import time
+                time.sleep(wait)
+                continue
+            log.error("Ollama timed out after %d attempt(s) (timeout=%ds)", attempt, _timeout)
+            return {
+                "skipped": True,
+                "reason":  f"Timed out after {attempt} attempt(s) ({_timeout}s each).",
+            }
+
+        except requests.exceptions.ConnectionError:
+            log.error("Cannot connect to Ollama at %s", base_url)
+            return {"error": f"Cannot connect to Ollama at {base_url}. Is it running? Try: ollama serve"}
+        except requests.exceptions.HTTPError as exc:
+            log.error("HTTP %s from Ollama: %s", exc.response.status_code, exc.response.text[:200])
+            if exc.response.status_code == 404:
+                return {"error": f"Model '{model}' not found. Pull it with: ollama pull {model}"}
+            return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"}
+        except json.JSONDecodeError as exc:
+            log.error("LLM returned non-JSON: %s", exc)
+            return {"error": "LLM returned non-JSON. Try a different model or add a stricter prompt."}
+        except Exception as exc:
+            log.exception("Unexpected error in ollama_check")
+            return {"error": str(exc)}
+
+    return {"skipped": True, "reason": "Ollama check failed after all retries."}
+
+
+def warmup_model(
+    model: str,
+    base_url: str = OLLAMA_BASE_URL,
+    timeout: int | None = None,
+) -> tuple[bool, str]:
+    """
+    Send a minimal request to Ollama to load the model into memory.
+    Call this once before starting a batch to avoid cold-start timeouts.
+
+    Returns (success, error_message).
+    """
+    # Warm-up gets extra budget on top of the regular timeout — loading a
+    # 7B model from disk can take 60-120s on a CPU-only machine.
+    _timeout = (timeout if timeout is not None else OLLAMA_TIMEOUT) + 120
+    log.info("Warming up model '%s' (loading into memory)…", model)
+    payload = {
+        "model":  model,
+        "format": "json",
+        "stream": False,
+        "messages": [
+            {"role": "user", "content": "Reply with exactly: {\"ok\": true}"},
+        ],
+    }
     try:
-        r = requests.post(f"{base_url}/api/chat", json=payload, timeout=120)
+        r = requests.post(f"{base_url}/api/chat", json=payload, timeout=_timeout)
         r.raise_for_status()
-        raw = r.json()["message"]["content"].strip()
-        result = json.loads(raw)
-        log.debug("LLM result: has_issues=%s issues=%d", result.get("has_issues"), len(result.get("issues", [])))
-        return result
-    except requests.exceptions.ConnectionError:
-        log.error("Cannot connect to Ollama at %s", base_url)
-        return {"error": f"Cannot connect to Ollama at {base_url}. Is it running? Try: ollama serve"}
+        log.info("Model '%s' warm-up complete.", model)
+        return True, ""
     except requests.exceptions.Timeout:
-        log.error("Ollama request timed out for model %s", model)
-        return {"error": "Ollama request timed out (>120s). Try a smaller/faster model."}
-    except requests.exceptions.HTTPError as exc:
-        log.error("HTTP %s from Ollama: %s", exc.response.status_code, exc.response.text[:200])
-        if exc.response.status_code == 404:
-            return {"error": f"Model '{model}' not found. Pull it with: ollama pull {model}"}
-        return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"}
-    except json.JSONDecodeError as exc:
-        log.error("LLM returned non-JSON: %s", exc)
-        return {"error": "LLM returned non-JSON. Try a different model or add a stricter prompt."}
+        msg = f"Model warm-up timed out after {_timeout}s — the model may be too large or the server is busy."
+        log.error(msg)
+        return False, msg
     except Exception as exc:
-        log.exception("Unexpected error in ollama_check")
-        return {"error": str(exc)}
+        msg = str(exc)
+        log.error("Model warm-up failed: %s", msg)
+        return False, msg
 
 
 def _filter_llm_result(result: dict, ignore: set[str]) -> dict:
     """Remove issues whose original text matches an ignored word."""
-    if "error" in result or not ignore:
+    if "error" in result or "skipped" in result or not ignore:
         return result
     filtered = [
         i for i in result.get("issues", [])
