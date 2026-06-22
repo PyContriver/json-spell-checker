@@ -46,6 +46,7 @@ ehthumbs.db
 *.env
 
 # Generated reports
+reports/
 *_report.json
 
 # Temporary git clone directories (created by the Git repo feature)

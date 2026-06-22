@@ -9,6 +9,7 @@ JSON Spell & Grammar Agent
 import json
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -117,7 +118,9 @@ Start Ollama (if not running):
     parser.add_argument("--ollama-url", default=OLLAMA_BASE_URL, metavar="URL",
                         help=f"Ollama base URL (default: {OLLAMA_BASE_URL})")
     parser.add_argument("--output", "-o", default=None, metavar="PATH",
-                        help="Save full report as JSON to this path")
+                        help="Save report to this path (default: reports/<timestamp>_report.json)")
+    parser.add_argument("--no-report", action="store_true",
+                        help="Skip saving the JSON report to disk")
     parser.add_argument("--list-models", action="store_true",
                         help="List models available in the running Ollama server and exit")
     parser.add_argument("--ignore", nargs="+", metavar="WORD", default=[],
@@ -341,12 +344,21 @@ def main() -> None:
         f" across [cyan]{total_fields}[/cyan] fields in [cyan]{len(json_files)}[/cyan] file(s).\n"
     )
 
-    # --- Optional JSON output ---
-    if args.output:
-        out = Path(args.output)
+    # --- Save report ---
+    # --output overrides the default path; --no-report disables saving entirely.
+    if not args.no_report:
+        if args.output:
+            out = Path(args.output)
+        else:
+            reports_dir = Path("reports")
+            reports_dir.mkdir(exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out   = reports_dir / f"{stamp}_report.json"
+
+        out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("w", encoding="utf-8") as f:
             json.dump(all_report_rows, f, indent=2, ensure_ascii=False)
-        console.print(f"[dim]Full report saved → {out}[/dim]\n")
+        console.print(f"[green]✔[/green] Report saved → [bold]{out}[/bold]\n")
 
     sys.exit(1 if grand_flagged else 0)
 
