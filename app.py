@@ -17,6 +17,9 @@ from src.utils.spell import spell_check
 from src.utils.llm import ollama_check, _filter_llm_result, check_ollama, OLLAMA_BASE_URL
 from src.utils.io import extract_strings, load_ignore_words, load_json_files_from_dir
 from src.utils.git import fetch_json_files, list_branches
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -384,16 +387,18 @@ def _render_results(ctx: dict) -> None:
 
     # Auto-save
     report_json = json.dumps(all_rows, indent=2, ensure_ascii=False)
-    reports_dir = Path("reports")
-    reports_dir.mkdir(exist_ok=True)
-    stamp       = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = reports_dir / f"{stamp}_report.json"
-    report_path.write_text(report_json, encoding="utf-8")
-
     st.markdown("---")
-    st.success(f"✔ Report auto-saved → `{report_path}`")
+    try:
+        reports_dir = Path("reports")
+        reports_dir.mkdir(exist_ok=True)
+        stamp       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = reports_dir / f"{stamp}_report.json"
+        report_path.write_text(report_json, encoding="utf-8")
+        st.success(f"✔ Report auto-saved → `{report_path}`")
+    except Exception as e:
+        st.warning(f"Could not save report to disk: {e}")
     st.download_button("⬇️  Download JSON Report", data=report_json,
-                       file_name=report_path.name, mime="application/json")
+                       file_name="spell_report.json", mime="application/json")
 
 
 def _build_context(file_map, file_entries, spell_results, llm_results, ignore_words) -> dict:
@@ -468,9 +473,11 @@ with tab_checker:
             col_d, col_r = st.columns([3, 1])
             with col_d:
                 local_dir = st.text_input("Directory path",
-                    placeholder="/Users/you/project/configs", label_visibility="collapsed")
+                    placeholder="/home/you/project/configs",
+                    label_visibility="collapsed",
+                    key="local_dir_input")
             with col_r:
-                recursive = st.checkbox("Recursive", value=False)
+                recursive = st.checkbox("Recursive", value=False, key="recursive_input")
 
         with src_git:
             st.markdown("Fetch `*.json` files from GitHub / GitLab via API. Falls back to `git clone` for other hosts.")
@@ -504,39 +511,50 @@ with tab_checker:
     if run_btn:
         file_map: dict = {}
 
-        if uploaded_files or json_text.strip():
-            for uf in (uploaded_files or []):
-                try:
-                    file_map[uf.name] = json.load(uf)
-                except json.JSONDecodeError as e:
-                    st.error(f"Invalid JSON in {uf.name}: {e}"); st.stop()
-            if not file_map and json_text.strip():
-                try:
-                    file_map["pasted_json"] = json.loads(json_text.strip())
-                except json.JSONDecodeError as e:
-                    st.error(f"Invalid JSON: {e}"); st.stop()
+        try:
+            if uploaded_files or json_text.strip():
+                for uf in (uploaded_files or []):
+                    try:
+                        file_map[uf.name] = json.load(uf)
+                    except json.JSONDecodeError as e:
+                        st.error(f"Invalid JSON in {uf.name}: {e}"); st.stop()
+                if not file_map and json_text.strip():
+                    try:
+                        file_map["pasted_json"] = json.loads(json_text.strip())
+                    except json.JSONDecodeError as e:
+                        st.error(f"Invalid JSON: {e}"); st.stop()
 
-        elif local_dir.strip():
-            p = Path(local_dir.strip())
-            if not p.is_dir():
-                st.error(f"Directory not found: `{p}`"); st.stop()
-            file_map = load_json_files_from_dir(p, recursive)
-            if not file_map:
-                st.warning(f"No JSON files found in `{p}`."); st.stop()
+            elif local_dir.strip():
+                with st.spinner(f"Scanning `{local_dir.strip()}`…"):
+                    p = Path(local_dir.strip())
+                    if not p.is_dir():
+                        st.error(f"Directory not found: `{p}`\n\nCheck the path is correct and accessible."); st.stop()
+                    file_map = load_json_files_from_dir(p, recursive)
+                if not file_map:
+                    st.warning(f"No JSON files found in `{p}`"
+                               + (" (try enabling **Recursive**)" if not recursive else "") + "."); st.stop()
+                st.success(f"Found {len(file_map)} JSON file(s) in `{p}`")
 
-        elif git_url.strip():
-            if not git_url.strip().startswith("http"):
-                st.error("Please provide a full HTTPS URL."); st.stop()
-            with st.spinner("Fetching JSON files from repository…"):
-                ok, file_map, err = fetch_json_files(
-                    git_url.strip(), git_token.strip(),
-                    git_branch or "main", git_subdir.strip().lstrip("/"),
-                )
-            if not ok:
-                st.error(f"Failed:\n```\n{err}\n```"); st.stop()
+            elif git_url.strip():
+                if not git_url.strip().startswith("http"):
+                    st.error("Please provide a full HTTPS URL."); st.stop()
+                with st.spinner("Fetching JSON files from repository…"):
+                    ok, file_map, err = fetch_json_files(
+                        git_url.strip(), git_token.strip(),
+                        git_branch or "main", git_subdir.strip().lstrip("/"),
+                    )
+                if not ok:
+                    st.error(f"Failed:\n```\n{err}\n```"); st.stop()
 
-        else:
-            st.warning("Choose a source above."); st.stop()
+            else:
+                st.warning("Choose a source: upload a file, enter a directory path, or provide a Git URL.")
+                st.stop()
+
+        except Exception as _e:
+            log.exception("Unexpected error loading files")
+            st.error(f"Unexpected error loading files: {_e}")
+            st.exception(_e)
+            st.stop()
 
         file_entries = {n: extract_strings(d) for n, d in file_map.items()}
         all_tasks    = [(n, f, t) for n, entries in file_entries.items() for f, t in entries]

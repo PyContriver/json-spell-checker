@@ -17,6 +17,10 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -39,6 +43,7 @@ def fetch_json_files(
       error_msg : human-readable error string   (empty on success)
     """
     provider = _detect_provider(url)
+    log.info("fetch_json_files: url=%s branch=%s subdir=%s provider=%s", url, branch, subdir, provider)
     if provider == "github":
         return _fetch_github(url, token, branch, subdir)
     if provider == "gitlab":

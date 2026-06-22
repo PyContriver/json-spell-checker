@@ -49,6 +49,10 @@ ehthumbs.db
 reports/
 *_report.json
 
+# Logs
+logs/
+*.log
+
 # Temporary git clone directories (created by the Git repo feature)
 json_spell_git_*/
 

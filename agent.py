@@ -23,6 +23,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCo
 from src.utils.spell import spell_check
 from src.utils.llm import ollama_list_models, ollama_check, _filter_llm_result, check_ollama, OLLAMA_BASE_URL
 from src.utils.io import extract_strings, load_ignore_words
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 console = Console()
 
@@ -177,6 +180,9 @@ def main() -> None:
     if not json_files:
         console.print("[red]Error:[/red] No JSON files found. Pass file paths or use --dir.")
         sys.exit(1)
+
+    log.info("Starting run: files=%s model=%s workers=%d",
+             [str(p) for p in json_files], args.model, args.workers)
 
     # --- Load all JSON ---
     file_data: dict[Path, Any] = {}

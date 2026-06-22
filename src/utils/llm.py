@@ -3,6 +3,10 @@ import os
 
 import requests
 
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
+
 # Overridable via OLLAMA_BASE_URL env var.
 # Defaults to localhost — works both locally and inside the Docker container
 # (since Ollama runs in the same container via entrypoint.sh).
@@ -38,8 +42,11 @@ def ollama_list_models(base_url: str = OLLAMA_BASE_URL) -> list[str]:
     try:
         r = requests.get(f"{base_url}/api/tags", timeout=5)
         r.raise_for_status()
-        return [m["name"] for m in r.json().get("models", [])]
-    except Exception:
+        models = [m["name"] for m in r.json().get("models", [])]
+        log.debug("Ollama models available: %s", models)
+        return models
+    except Exception as exc:
+        log.warning("Could not reach Ollama at %s: %s", base_url, exc)
         return []
 
 
@@ -118,22 +125,30 @@ def ollama_check(
             {"role": "user",   "content": f'Text: """{text}"""'},
         ],
     }
+    log.debug("LLM check: model=%s text_len=%d", model, len(text))
     try:
         r = requests.post(f"{base_url}/api/chat", json=payload, timeout=120)
         r.raise_for_status()
         raw = r.json()["message"]["content"].strip()
-        return json.loads(raw)
+        result = json.loads(raw)
+        log.debug("LLM result: has_issues=%s issues=%d", result.get("has_issues"), len(result.get("issues", [])))
+        return result
     except requests.exceptions.ConnectionError:
+        log.error("Cannot connect to Ollama at %s", base_url)
         return {"error": f"Cannot connect to Ollama at {base_url}. Is it running? Try: ollama serve"}
     except requests.exceptions.Timeout:
+        log.error("Ollama request timed out for model %s", model)
         return {"error": "Ollama request timed out (>120s). Try a smaller/faster model."}
     except requests.exceptions.HTTPError as exc:
+        log.error("HTTP %s from Ollama: %s", exc.response.status_code, exc.response.text[:200])
         if exc.response.status_code == 404:
             return {"error": f"Model '{model}' not found. Pull it with: ollama pull {model}"}
         return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"}
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        log.error("LLM returned non-JSON: %s", exc)
         return {"error": "LLM returned non-JSON. Try a different model or add a stricter prompt."}
     except Exception as exc:
+        log.exception("Unexpected error in ollama_check")
         return {"error": str(exc)}
 
 

@@ -2,6 +2,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
+
 
 def extract_strings(data: Any, path: str = "") -> list[tuple[str, str]]:
     """Recursively collect (dot-path, string-value) pairs from any JSON structure."""
@@ -41,15 +45,18 @@ def load_json_files_from_dir(
 ) -> dict[str, Any]:
     """
     Return {relative_path: parsed_json} for every valid *.json file found.
-    Invalid JSON files are silently skipped (caller may log the warning).
+    Invalid JSON files are skipped with a warning log.
     """
     pattern = "**/*.json" if recursive else "*.json"
     result: dict[str, Any] = {}
+    log.info("Scanning directory: %s (recursive=%s)", directory, recursive)
     for p in sorted(directory.glob(pattern)):
         try:
             result[str(p.relative_to(directory))] = json.loads(
                 p.read_text(encoding="utf-8")
             )
-        except json.JSONDecodeError:
-            pass  # callers can iterate skipped files if needed
+            log.debug("Loaded: %s", p)
+        except json.JSONDecodeError as exc:
+            log.warning("Skipping %s — invalid JSON: %s", p, exc)
+    log.info("Found %d JSON file(s) in %s", len(result), directory)
     return result
