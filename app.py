@@ -15,10 +15,13 @@ from spellchecker import SpellChecker
 
 from src.utils.spell import spell_check
 from src.utils.llm import (ollama_check, _filter_llm_result, check_ollama,
-                           warmup_model, OLLAMA_BASE_URL, OLLAMA_TIMEOUT, OLLAMA_MAX_RETRIES)
+                           warmup_model, OLLAMA_BASE_URL, OLLAMA_TIMEOUT, OLLAMA_MAX_RETRIES,
+                           OLLAMA_NUM_CTX, OLLAMA_NUM_THREAD)
 from src.utils.io import extract_strings, load_ignore_words, load_json_files_from_dir
 from src.utils.git import fetch_json_files, list_branches
 from src.utils.logger import get_logger
+from src.utils import settings as _settings
+from src.utils import run_manager as _rm
 
 log = get_logger(__name__)
 
@@ -53,6 +56,25 @@ _SS_DEFAULTS: dict = {
 for _k, _v in _SS_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
+
+# Load persisted user preferences once per session
+if "prefs" not in st.session_state:
+    st.session_state.prefs = _settings.load()
+
+# Reconnect to an active run if this is a fresh session after a refresh
+if not st.session_state.is_running and not st.session_state.run_context:
+    active = _rm.get()
+    if active and active["thread"].is_alive():
+        log.info("Reconnecting refreshed session to active run.")
+        st.session_state.worker_thread    = active["thread"]
+        st.session_state.stop_event       = active["stop_event"]
+        st.session_state.progress_counter = active["progress_counter"]
+        st.session_state.llm_results      = active["llm_results"]
+        st.session_state.llm_total        = active["llm_total"]
+        st.session_state.was_stopped      = active.get("was_stopped", False)
+        st.session_state.run_context      = active["ctx"]
+        st.session_state.is_running       = True
+        st.session_state.run_phase        = "llm"
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -137,12 +159,14 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-    DEFAULT_MODEL = "mistral:7b"
+    prefs = st.session_state.prefs
+
     st.markdown("**LLM Model**")
-    available_models = health["models"]
-    model_options    = ["(none — spell check only)"] + available_models
-    default_index    = next(
-        (i + 1 for i, m in enumerate(available_models) if m == DEFAULT_MODEL), 0
+    available_models  = health["models"]
+    model_options     = ["(none — spell check only)"] + available_models
+    saved_model       = prefs.get("selected_model", "mistral:7b")
+    default_index     = next(
+        (i + 1 for i, m in enumerate(available_models) if m == saved_model), 0
     )
     selected_model_label = st.selectbox(
         "Ollama model", model_options, index=default_index,
@@ -165,34 +189,75 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Spell-check Language**")
-    lang = st.selectbox("Language", ["en", "es", "de", "fr", "pt"], label_visibility="collapsed")
-    no_spellcheck = st.checkbox("Skip spell checker (LLM only)", value=False)
+    lang_opts = ["en", "es", "de", "fr", "pt"]
+    lang = st.selectbox("Language", lang_opts,
+                        index=lang_opts.index(prefs.get("lang", "en")),
+                        label_visibility="collapsed")
+    no_spellcheck = st.checkbox("Skip spell checker (LLM only)", value=prefs.get("no_spellcheck", True))
     st.markdown("---")
     st.markdown("**Ignore Words**")
     ignore_raw = st.text_area(
         "One word per line or space-separated",
+        value=prefs.get("ignore_raw", ""),
         placeholder="BGP\nOSPF\nMPLS\ndatacenter",
         height=110, label_visibility="collapsed",
     )
     st.markdown("---")
     st.markdown("**Parallel Workers**")
-    workers = st.slider("LLM workers", min_value=1, max_value=12, value=4, label_visibility="collapsed")
+    workers = st.slider("LLM workers", min_value=1, max_value=12,
+                        value=prefs.get("workers", 1), label_visibility="collapsed")
 
     st.markdown("---")
     st.markdown("**LLM Timeout (seconds)**")
     llm_timeout = st.number_input(
         "Timeout per request",
-        min_value=30, max_value=600, value=OLLAMA_TIMEOUT, step=30,
+        min_value=30, max_value=600, value=prefs.get("llm_timeout", OLLAMA_TIMEOUT), step=30,
         label_visibility="collapsed",
         help="Increase if you see timeout errors. Each retry uses the same timeout.",
     )
     st.markdown("**Retries on Timeout**")
     llm_retries = st.number_input(
         "Retries",
-        min_value=0, max_value=5, value=OLLAMA_MAX_RETRIES, step=1,
+        min_value=0, max_value=5, value=prefs.get("llm_retries", OLLAMA_MAX_RETRIES), step=1,
         label_visibility="collapsed",
         help="Number of times to retry a timed-out request before marking it as failed.",
     )
+
+    st.markdown("---")
+    st.markdown("**Context Window** *(smaller = faster)*")
+    ctx_opts = [512, 1024, 2048, 4096]
+    saved_ctx = prefs.get("llm_num_ctx", OLLAMA_NUM_CTX)
+    if saved_ctx not in ctx_opts:
+        saved_ctx = 1024
+    llm_num_ctx = st.select_slider(
+        "num_ctx", options=ctx_opts, value=saved_ctx,
+        label_visibility="collapsed",
+        help="Tokens Ollama allocates per request. 1024 is plenty for spell-check.",
+    )
+    st.markdown("**CPU Threads for Ollama**")
+    llm_num_thread = st.number_input(
+        "num_thread (0 = auto)",
+        min_value=0, max_value=32, value=prefs.get("llm_num_thread", OLLAMA_NUM_THREAD), step=1,
+        label_visibility="collapsed",
+        help="Limit Ollama's CPU threads so the app has headroom.",
+    )
+
+    st.markdown("---")
+    if st.button("💾  Save Settings", use_container_width=True):
+        new_prefs = {
+            "selected_model": selected_model or "mistral:7b",
+            "lang":           lang,
+            "no_spellcheck":  no_spellcheck,
+            "ignore_raw":     ignore_raw,
+            "workers":        workers,
+            "llm_timeout":    int(llm_timeout),
+            "llm_retries":    int(llm_retries),
+            "llm_num_ctx":    llm_num_ctx,
+            "llm_num_thread": int(llm_num_thread),
+        }
+        _settings.save(new_prefs)
+        st.session_state.prefs = new_prefs
+        st.success("✔ Saved")
     st.markdown("---")
 
     # Run status indicator — always visible in sidebar
@@ -215,20 +280,24 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 
 def _llm_worker(tasks, model, base_url, ignore_words, results, stop_event, n_workers, counter,
-                timeout=180, max_retries=2):
-    """Runs in a background thread. Writes results into shared dict."""
+                timeout=240, max_retries=2, num_ctx=1024, num_thread=0):
+    """Runs in a background thread. Writes results and checkpoints to disk."""
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {
-            executor.submit(ollama_check, model, text, base_url, ignore_words, timeout, max_retries): (name, field)
+            executor.submit(ollama_check, model, text, base_url, ignore_words,
+                            timeout, max_retries, num_ctx, num_thread): (name, field)
             for name, field, text in tasks
         }
         for future in as_completed(futures):
             if stop_event.is_set():
                 executor.shutdown(wait=False, cancel_futures=True)
+                _rm.mark_stopped()
                 break
             name, field = futures[future]
             results[f"{name}||{field}"] = _filter_llm_result(future.result(), ignore_words)
-            counter[0] += 1   # GIL-safe for simple integer increment on a list
+            counter[0] += 1
+            _rm.maybe_checkpoint(counter[0])
+    _rm.finish()
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +568,40 @@ tab_checker, tab_reports = st.tabs(["🔍  Spell Checker", "📋  Reports"])
 
 with tab_checker:
 
+    # ── Show partial results from a previous interrupted run ────────────────
+    if not st.session_state.is_running and not st.session_state.run_context:
+        ckpt = _rm.load_checkpoint()
+        if ckpt and ckpt.get("status") in ("in_progress", "stopped"):
+            pct = int(ckpt["completed"] / ckpt["total"] * 100) if ckpt["total"] else 0
+            st.warning(
+                f"⚠ A previous run was interrupted at **{ckpt['completed']}/{ckpt['total']} fields ({pct}%)** "
+                f"— model: `{ckpt.get('model','?')}` · saved: `{ckpt.get('saved_at','?')[:19]}`"
+            )
+            col_view, col_discard = st.columns([2, 1])
+            with col_view:
+                if st.button("📋 View partial results", use_container_width=True):
+                    # Reconstruct minimal context from checkpoint for rendering
+                    file_names    = ckpt.get("file_names", [])
+                    file_entries  = ckpt.get("file_entries", {})
+                    spell_results = ckpt.get("spell_results", {})
+                    llm_flat      = ckpt.get("llm_results", {})
+                    ignore_words  = set(ckpt.get("ignore_words", []))
+                    file_map      = {n: {} for n in file_names}
+                    llm_results   = {n: {} for n in file_names}
+                    for key, val in llm_flat.items():
+                        if "||" in key:
+                            name, field = key.split("||", 1)
+                            if name in llm_results:
+                                llm_results[name][field] = val
+                    ctx = _build_context(file_map, file_entries, spell_results,
+                                         llm_results, ignore_words)
+                    st.session_state.run_context = ctx
+                    st.rerun()
+            with col_discard:
+                if st.button("🗑 Discard", use_container_width=True):
+                    _rm.clear()
+                    st.rerun()
+
     # ── Source selector (hidden while a run is in progress) ─────────────────
     uploaded_files = []
     json_text = local_dir = git_url = git_token = git_branch = git_subdir = ""
@@ -585,6 +688,8 @@ with tab_checker:
                 "workers":        workers,
                 "llm_timeout":    llm_timeout,
                 "llm_retries":    llm_retries,
+                "llm_num_ctx":    llm_num_ctx,
+                "llm_num_thread": llm_num_thread,
             }
             st.session_state.run_phase = "spell"
             st.rerun()
@@ -607,8 +712,10 @@ with tab_checker:
         no_spellcheck   = p.get("no_spellcheck", False)
         ignore_raw      = p.get("ignore_raw", "")
         workers         = p.get("workers", 4)
-        llm_timeout     = p.get("llm_timeout", OLLAMA_TIMEOUT)
-        llm_retries     = p.get("llm_retries", OLLAMA_MAX_RETRIES)
+        llm_timeout     = p.get("llm_timeout",    OLLAMA_TIMEOUT)
+        llm_retries     = p.get("llm_retries",    OLLAMA_MAX_RETRIES)
+        llm_num_ctx     = p.get("llm_num_ctx",    OLLAMA_NUM_CTX)
+        llm_num_thread  = p.get("llm_num_thread", OLLAMA_NUM_THREAD)
 
         file_map: dict = {}
 
@@ -719,13 +826,18 @@ with tab_checker:
                 target=_llm_worker,
                 args=(all_tasks, selected_model, OLLAMA_BASE_URL, ignore_words,
                       llm_results_shared, stop_event, workers, progress_counter,
-                      llm_timeout, llm_retries),
+                      llm_timeout, llm_retries, llm_num_ctx, llm_num_thread),
                 daemon=True,
             )
             thread.start()
             st.session_state.worker_thread = thread
             st.session_state.is_running    = True
             st.session_state.run_phase     = "llm"
+            _rm.start(
+                st.session_state.run_context,
+                thread, stop_event, progress_counter,
+                llm_results_shared, len(all_tasks),
+            )
             st.rerun()
         else:
             ctx = _build_context(file_map, file_entries, spell_results, {}, ignore_words)
@@ -774,6 +886,7 @@ with tab_checker:
             st.session_state.is_running = False
             st.session_state.run_phase  = "idle"
             st.session_state._pending   = None
+            _rm.clear()
             ctx_raw   = st.session_state.run_context
             llm_flat  = st.session_state.llm_results
 

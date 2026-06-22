@@ -49,6 +49,12 @@ ehthumbs.db
 reports/
 *_report.json
 
+# User preferences (machine-specific)
+settings.json
+
+# Run checkpoint (ephemeral)
+run_checkpoint.json
+
 # Logs
 logs/
 *.log

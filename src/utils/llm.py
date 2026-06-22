@@ -11,8 +11,10 @@ log = get_logger(__name__)
 # Defaults to localhost — works both locally and inside the Docker container
 # (since Ollama runs in the same container via entrypoint.sh).
 OLLAMA_BASE_URL     = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_TIMEOUT      = int(os.environ.get("OLLAMA_TIMEOUT", "300"))   # seconds per request
+OLLAMA_TIMEOUT      = int(os.environ.get("OLLAMA_TIMEOUT", "240"))   # seconds per request
 OLLAMA_MAX_RETRIES  = int(os.environ.get("OLLAMA_MAX_RETRIES", "2"))  # retry on timeout
+OLLAMA_NUM_CTX      = int(os.environ.get("OLLAMA_NUM_CTX",     "1024")) # context window — smaller = faster
+OLLAMA_NUM_THREAD   = int(os.environ.get("OLLAMA_NUM_THREAD",  "0"))    # 0 = Ollama picks
 
 _LLM_SYSTEM = """\
 You are a precise spelling and grammar checker with deep knowledge of computer networking \
@@ -107,6 +109,8 @@ def ollama_check(
     ignore: set[str] | None = None,
     timeout: int | None = None,
     max_retries: int | None = None,
+    num_ctx: int | None = None,
+    num_thread: int | None = None,
 ) -> dict:
     """
     Send text to Ollama for spell/grammar review with retry on timeout.
@@ -117,6 +121,8 @@ def ollama_check(
     """
     _timeout     = timeout     if timeout     is not None else OLLAMA_TIMEOUT
     _max_retries = max_retries if max_retries is not None else OLLAMA_MAX_RETRIES
+    _num_ctx     = num_ctx     if num_ctx     is not None else OLLAMA_NUM_CTX
+    _num_thread  = num_thread  if num_thread  is not None else OLLAMA_NUM_THREAD
 
     system = _LLM_SYSTEM
     if ignore:
@@ -126,10 +132,15 @@ def ollama_check(
             f"and do NOT flag them: {word_list}."
         )
 
+    options: dict = {"num_ctx": _num_ctx}
+    if _num_thread > 0:
+        options["num_thread"] = _num_thread
+
     payload = {
-        "model":  model,
-        "format": "json",
-        "stream": False,
+        "model":   model,
+        "format":  "json",
+        "stream":  False,
+        "options": options,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user",   "content": f'Text: """{text}"""'},
