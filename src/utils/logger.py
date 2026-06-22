@@ -65,10 +65,10 @@ def _setup() -> None:
         # Can't write log file — fall back to console only
         print(f"[logger] WARNING: cannot open log file {_LOG_FILE}: {exc}", file=sys.stderr)
 
-    # ── Console handler (WARNING+ by default for cleaner terminal output) ────
+    # ── Console handler — shows at the configured level (default: INFO) ────
     if _LOG_CONSOLE:
         ch = logging.StreamHandler(sys.stderr)
-        ch.setLevel(max(level, logging.WARNING))
+        ch.setLevel(level)
         ch.setFormatter(formatter)
         root.addHandler(ch)
 

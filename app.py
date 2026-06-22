@@ -174,8 +174,21 @@ with st.sidebar:
     st.markdown("**Parallel Workers**")
     workers = st.slider("LLM workers", min_value=1, max_value=12, value=4, label_visibility="collapsed")
     st.markdown("---")
-    st.markdown("<span style='font-size:0.75rem;color:#475569'>Powered by pyspellchecker + Ollama</span>",
-                unsafe_allow_html=True)
+
+    # Run status indicator — always visible in sidebar
+    if st.session_state.is_running:
+        done  = st.session_state.progress_counter[0]
+        total = st.session_state.llm_total
+        pct   = int(done / total * 100) if total else 0
+        st.markdown(
+            f"<div style='background:#1e1b4b;border:1px solid #4338ca;border-radius:8px;"
+            f"padding:8px 12px;font-size:0.8rem;color:#a5b4fc'>"
+            f"🔄 <b>Running…</b> {done}/{total} fields ({pct}%)</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("<span style='font-size:0.75rem;color:#475569'>Powered by pyspellchecker + Ollama</span>",
+                    unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Helper: LLM background worker
@@ -503,7 +516,12 @@ with tab_checker:
 
         col_run, _ = st.columns([1, 4])
         with col_run:
-            run_btn = st.button("🔍  Run Check", type="primary", use_container_width=True)
+            run_btn = st.button(
+                "🔍  Run Check",
+                type="primary",
+                use_container_width=True,
+                disabled=st.session_state.is_running,
+            )
     else:
         run_btn = False
 
@@ -621,12 +639,29 @@ with tab_checker:
         total   = st.session_state.llm_total
         done    = st.session_state.progress_counter[0]
         model   = st.session_state.run_context.get("model", "")
+        pct     = done / total if total else 0
+        ctx_raw = st.session_state.run_context
+        n_files = len(ctx_raw.get("file_map", {}))
 
-        st.markdown(f"**Running LLM check** with `{model}`…")
+        # Status banner
+        st.markdown(f"""
+        <div style="background:#1e1b4b;border:1px solid #4338ca;border-radius:12px;
+                    padding:1rem 1.4rem;margin-bottom:1rem">
+          <div style="font-size:1rem;font-weight:700;color:#a5b4fc;margin-bottom:0.4rem">
+            🔄 Check in progress
+          </div>
+          <div style="font-size:0.85rem;color:#c7d2fe;display:flex;gap:2rem;flex-wrap:wrap">
+            <span>Model <b style="color:#e0e7ff">{model}</b></span>
+            <span>Files <b style="color:#e0e7ff">{n_files}</b></span>
+            <span>Fields <b style="color:#e0e7ff">{done} / {total}</b> checked</span>
+            <span>Progress <b style="color:#e0e7ff">{pct*100:.0f}%</b></span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         col_bar, col_btn = st.columns([5, 1])
         with col_bar:
-            pct  = done / total if total else 0
-            st.progress(pct, text=f"{done} / {total} fields checked")
+            st.progress(pct)
         with col_btn:
             if st.button("⏹ Stop", type="secondary", use_container_width=True):
                 st.session_state.stop_event.set()
