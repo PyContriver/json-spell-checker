@@ -38,13 +38,16 @@ st.set_page_config(
 
 _SS_DEFAULTS: dict = {
     "is_running":       False,
-    "stop_event":       None,      # threading.Event, created on first run
+    "run_phase":        "idle",    # "idle" | "spell" | "llm" | "done"
+    "stop_event":       None,
     "worker_thread":    None,
-    "progress_counter": [0],       # mutable list so background thread can increment
+    "progress_counter": [0],
     "llm_total":        0,
-    "llm_results":      {},        # {"name||field": result_dict}
-    "run_context":      None,      # stores everything needed to render results
+    "llm_results":      {},
+    "run_context":      None,
     "was_stopped":      False,
+    # Saved widget values so they survive the two-rerun pattern
+    "_pending":         None,
 }
 for _k, _v in _SS_DEFAULTS.items():
     if _k not in st.session_state:
@@ -514,19 +517,58 @@ with tab_checker:
                 git_subdir = st.text_input("Directory within repo",
                     placeholder="configs/  (leave blank for root)")
 
+        _busy = st.session_state.run_phase != "idle"
+        _btn_labels = {"idle": "🔍  Run Check", "spell": "⏳ Spell checking…",
+                       "llm": "⏳ LLM reviewing…", "done": "🔍  Run Check"}
         col_run, _ = st.columns([1, 4])
         with col_run:
             run_btn = st.button(
-                "🔍  Run Check",
+                _btn_labels.get(st.session_state.run_phase, "🔍  Run Check"),
                 type="primary",
                 use_container_width=True,
-                disabled=st.session_state.is_running,
+                disabled=_busy or st.session_state.is_running,
             )
+
+        # On click: save all widget values and trigger rerun so button
+        # renders as disabled BEFORE the heavy work begins
+        if run_btn and st.session_state.run_phase == "idle":
+            st.session_state._pending = {
+                "uploaded_files": uploaded_files,
+                "json_text":      json_text,
+                "local_dir":      local_dir,
+                "recursive":      recursive,
+                "git_url":        git_url,
+                "git_token":      git_token,
+                "git_branch":     git_branch,
+                "git_subdir":     git_subdir,
+                "selected_model": selected_model,
+                "lang":           lang,
+                "no_spellcheck":  no_spellcheck,
+                "ignore_raw":     ignore_raw,
+                "workers":        workers,
+            }
+            st.session_state.run_phase = "spell"
+            st.rerun()
     else:
         run_btn = False
 
-    # ── Start a new run ──────────────────────────────────────────────────────
-    if run_btn:
+    # ── Execute run (triggered by run_phase transition, not run_btn directly) ─
+    if st.session_state.run_phase in ("spell", "llm") and not st.session_state.is_running:
+        p = st.session_state._pending or {}
+        uploaded_files  = p.get("uploaded_files", [])
+        json_text       = p.get("json_text", "")
+        local_dir       = p.get("local_dir", "")
+        recursive       = p.get("recursive", False)
+        git_url         = p.get("git_url", "")
+        git_token       = p.get("git_token", "")
+        git_branch      = p.get("git_branch", "main")
+        git_subdir      = p.get("git_subdir", "")
+        selected_model  = p.get("selected_model", None)
+        lang            = p.get("lang", "en")
+        no_spellcheck   = p.get("no_spellcheck", False)
+        ignore_raw      = p.get("ignore_raw", "")
+        workers         = p.get("workers", 4)
+
         file_map: dict = {}
 
         try:
@@ -570,6 +612,7 @@ with tab_checker:
 
         except Exception as _e:
             log.exception("Unexpected error loading files")
+            st.session_state.run_phase = "idle"
             st.error(f"Unexpected error loading files: {_e}")
             st.exception(_e)
             st.stop()
@@ -578,22 +621,29 @@ with tab_checker:
         all_tasks    = [(n, f, t) for n, entries in file_entries.items() for f, t in entries]
 
         if not all_tasks:
+            st.session_state.run_phase = "idle"
             st.warning("No string values found."); st.stop()
 
         words_list = ignore_raw.replace(",", " ").split()
         try:
             ignore_words = load_ignore_words(words_list, None)
         except FileNotFoundError as e:
+            st.session_state.run_phase = "idle"
             st.error(str(e)); st.stop()
 
-        # Pass 1 — spell check (fast, synchronous)
+        # Pass 1 — spell check with live progress bar
         spell_results: dict = {n: {} for n in file_map}
         if not no_spellcheck:
             checker = SpellChecker(language=lang)
             if ignore_words:
                 checker.word_frequency.load_words(ignore_words)
-            for n, f, t in all_tasks:
+            spell_prog = st.progress(0, text=f"🔡 Spell checking 0 / {len(all_tasks)} fields…")
+            for i, (n, f, t) in enumerate(all_tasks, 1):
                 spell_results[n][f] = spell_check(checker, t, ignore_words)
+                spell_prog.progress(i / len(all_tasks),
+                                    text=f"🔡 Spell checking {i} / {len(all_tasks)} fields…")
+            spell_prog.empty()
+            log.info("Spell check complete: %d fields across %d files", len(all_tasks), len(file_map))
 
         # Pass 2 — LLM (background thread)
         stop_event = threading.Event()
@@ -606,7 +656,6 @@ with tab_checker:
         st.session_state.llm_total        = len(all_tasks) if selected_model else 0
         st.session_state.was_stopped      = False
 
-        # Store everything needed to render results after the thread finishes
         st.session_state.run_context = {
             "file_map":      file_map,
             "file_entries":  file_entries,
@@ -627,10 +676,11 @@ with tab_checker:
             thread.start()
             st.session_state.worker_thread = thread
             st.session_state.is_running    = True
+            st.session_state.run_phase     = "llm"
             st.rerun()
         else:
-            # No LLM — build and render immediately
             ctx = _build_context(file_map, file_entries, spell_results, {}, ignore_words)
+            st.session_state.run_phase = "idle"
             _render_results(ctx)
 
     # ── Polling loop while LLM thread is alive ───────────────────────────────
@@ -673,6 +723,8 @@ with tab_checker:
         else:
             # Thread finished (or was stopped) — compile and render
             st.session_state.is_running = False
+            st.session_state.run_phase  = "idle"
+            st.session_state._pending   = None
             ctx_raw   = st.session_state.run_context
             llm_flat  = st.session_state.llm_results
 
