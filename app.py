@@ -830,9 +830,10 @@ with tab_checker:
                 daemon=True,
             )
             thread.start()
-            st.session_state.worker_thread = thread
-            st.session_state.is_running    = True
-            st.session_state.run_phase     = "llm"
+            st.session_state.worker_thread        = thread
+            st.session_state.is_running           = True
+            st.session_state.run_phase            = "llm"
+            st.session_state._last_render_count   = 0
             _rm.start(
                 st.session_state.run_context,
                 thread, stop_event, progress_counter,
@@ -878,8 +879,28 @@ with tab_checker:
                 st.session_state.stop_event.set()
                 st.session_state.was_stopped = True
 
+        # ── Live partial results (re-render every 50 completed fields) ───────
+        BATCH_RENDER = 50
+        last_render  = st.session_state.get("_last_render_count", 0)
+        if done >= last_render + BATCH_RENDER or (done > 0 and last_render == 0):
+            st.session_state._last_render_count = done
+            llm_flat     = st.session_state.llm_results
+            llm_partial  = {n: {} for n in ctx_raw["file_map"]}
+            for key, val in llm_flat.items():
+                if "||" in key:
+                    n, f = key.split("||", 1)
+                    if n in llm_partial:
+                        llm_partial[n][f] = val
+            partial_ctx = _build_context(
+                ctx_raw["file_map"], ctx_raw["file_entries"],
+                ctx_raw["spell_results"], llm_partial, ctx_raw["ignore_words"],
+            )
+            st.markdown(f"---\n**Live Results** *(updating every {BATCH_RENDER} fields — {done} done so far)*")
+            _render_field_rows(partial_ctx["per_file_rows"], partial_ctx["file_map"],
+                               key_prefix="live_partial")
+
         if thread and thread.is_alive():
-            time.sleep(0.4)
+            time.sleep(2)   # slower poll — partial results are rendered above
             st.rerun()
         else:
             # Thread finished (or was stopped) — compile and render

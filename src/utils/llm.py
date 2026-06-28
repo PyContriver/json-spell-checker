@@ -137,10 +137,11 @@ def ollama_check(
         options["num_thread"] = _num_thread
 
     payload = {
-        "model":   model,
-        "format":  "json",
-        "stream":  False,
-        "options": options,
+        "model":      model,
+        "format":     "json",
+        "stream":     False,
+        "keep_alive": "24h",   # keep model in memory throughout the batch
+        "options":    options,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user",   "content": f'Text: """{text}"""'},
@@ -208,9 +209,10 @@ def warmup_model(
     _timeout = (timeout if timeout is not None else OLLAMA_TIMEOUT) + 120
     log.info("Warming up model '%s' (loading into memory)…", model)
     payload = {
-        "model":  model,
-        "format": "json",
-        "stream": False,
+        "model":      model,
+        "format":     "json",
+        "stream":     False,
+        "keep_alive": "24h",
         "messages": [
             {"role": "user", "content": "Reply with exactly: {\"ok\": true}"},
         ],
