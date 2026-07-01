@@ -1,10 +1,46 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+
+def _normalise(text: str) -> str:
+    """Lowercase, split camelCase/snake_case/kebab-case/dots into words, collapse spaces."""
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)   # camelCase → camel Case
+    text = re.sub(r"[_\-\.\s]+", " ", text)             # separators → space
+    return text.strip().lower()
+
+
+def is_key_echo(field_path: str, value: str) -> bool:
+    """
+    Return True when the value is just a reformatted version of the field key.
+
+    Examples that return True (false positives to skip):
+      path=virus          value="Virus"
+      path=top_target_devices  value="Top Target Devices"
+      path=source         value="Source"
+      path=bgp.status     value="Status"   ← last key segment matches
+    """
+    # Extract the last key segment from dot-path, strip array indices
+    path_clean = re.sub(r"\[\d+\]", "", field_path)
+    last_key   = path_clean.split(".")[-1]
+
+    key_norm = _normalise(last_key)
+    val_norm = _normalise(value)
+
+    # Exact match after normalisation
+    if key_norm == val_norm:
+        return True
+
+    # Value is a single word that matches the key (handles "Source" for key "source")
+    if len(val_norm.split()) == 1 and val_norm == key_norm:
+        return True
+
+    return False
 
 
 def extract_strings(data: Any, path: str = "") -> list[tuple[str, str]]:

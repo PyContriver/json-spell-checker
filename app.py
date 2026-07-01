@@ -17,7 +17,7 @@ from src.utils.spell import spell_check
 from src.utils.llm import (ollama_check, _filter_llm_result, check_ollama,
                            warmup_model, OLLAMA_BASE_URL, OLLAMA_TIMEOUT, OLLAMA_MAX_RETRIES,
                            OLLAMA_NUM_CTX, OLLAMA_NUM_THREAD)
-from src.utils.io import extract_strings, load_ignore_words, load_json_files_from_dir
+from src.utils.io import extract_strings, load_ignore_words, load_json_files_from_dir, is_key_echo
 from src.utils.git import fetch_json_files, list_branches
 from src.utils.logger import get_logger
 from src.utils import settings as _settings
@@ -194,7 +194,12 @@ with st.sidebar:
     lang = st.selectbox("Language", lang_opts,
                         index=lang_opts.index(prefs.get("lang", "en")),
                         label_visibility="collapsed")
-    no_spellcheck = st.checkbox("Skip spell checker (LLM only)", value=prefs.get("no_spellcheck", True))
+    no_spellcheck   = st.checkbox("Skip spell checker (LLM only)", value=prefs.get("no_spellcheck", True))
+    skip_key_echo   = st.checkbox(
+        "Skip key-echo values",
+        value=prefs.get("skip_key_echo", True),
+        help='Skip values that are just a reformatted key, e.g. key: "source" → value: "Source"',
+    )
     st.markdown("---")
     st.markdown("**Ignore Words**")
     ignore_raw = st.text_area(
@@ -255,6 +260,7 @@ with st.sidebar:
             "llm_retries":    int(llm_retries),
             "llm_num_ctx":    llm_num_ctx,
             "llm_num_thread": int(llm_num_thread),
+            "skip_key_echo":  skip_key_echo,
         }
         _settings.save(new_prefs)
         st.session_state.prefs = new_prefs
@@ -286,7 +292,7 @@ def _llm_worker(tasks, model, base_url, ignore_words, results, stop_event, n_wor
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {
             executor.submit(ollama_check, model, text, base_url, ignore_words,
-                            timeout, max_retries, num_ctx, num_thread): (name, field)
+                            timeout, max_retries, num_ctx, num_thread, stop_event): (name, field)
             for name, field, text in tasks
         }
         for future in as_completed(futures):
@@ -832,6 +838,7 @@ with tab_checker:
                 "llm_retries":    llm_retries,
                 "llm_num_ctx":    llm_num_ctx,
                 "llm_num_thread": llm_num_thread,
+                "skip_key_echo":  skip_key_echo,
             }
             st.session_state.run_phase = "spell"
             st.rerun()
@@ -858,6 +865,7 @@ with tab_checker:
         llm_retries     = p.get("llm_retries",    OLLAMA_MAX_RETRIES)
         llm_num_ctx     = p.get("llm_num_ctx",    OLLAMA_NUM_CTX)
         llm_num_thread  = p.get("llm_num_thread", OLLAMA_NUM_THREAD)
+        skip_key_echo   = p.get("skip_key_echo",  True)
 
         file_map: dict = {}
 
@@ -908,8 +916,17 @@ with tab_checker:
             st.stop()
 
         file_entries = {n: extract_strings(d) for n, d in file_map.items()}
-        all_tasks    = [(n, f, t) for n, entries in file_entries.items() for f, t in entries]
+        all_tasks    = [
+            (n, f, t) for n, entries in file_entries.items() for f, t in entries
+            if not (skip_key_echo and is_key_echo(f, t))
+        ]
+        echoes_skipped = sum(
+            1 for n, entries in file_entries.items() for f, t in entries
+            if skip_key_echo and is_key_echo(f, t)
+        )
 
+        if echoes_skipped:
+            log.info("Key-echo filter: skipped %d value(s) that mirror their key.", echoes_skipped)
         if not all_tasks:
             st.session_state.run_phase = "idle"
             st.warning("No string values found."); st.stop()
@@ -1020,6 +1037,8 @@ with tab_checker:
             if st.button("⏹ Stop", type="secondary", use_container_width=True):
                 st.session_state.stop_event.set()
                 st.session_state.was_stopped = True
+        if st.session_state.was_stopped:
+            st.warning("⏹ Stop requested — completing current field then stopping…")
 
         # ── Live partial results (re-render every 50 completed fields) ───────
         BATCH_RENDER = 50

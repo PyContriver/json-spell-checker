@@ -111,6 +111,7 @@ def ollama_check(
     max_retries: int | None = None,
     num_ctx: int | None = None,
     num_thread: int | None = None,
+    stop_event=None,          # optional threading.Event — checked between retries
 ) -> dict:
     """
     Send text to Ollama for spell/grammar review with retry on timeout.
@@ -152,6 +153,11 @@ def ollama_check(
               model, len(text), _timeout, _max_retries)
 
     for attempt in range(1, _max_retries + 2):   # +2: first try + retries
+        # Check stop before every attempt so the button is responsive
+        if stop_event is not None and stop_event.is_set():
+            log.info("LLM check aborted by stop_event on attempt %d", attempt)
+            return {"skipped": True, "reason": "Stopped by user."}
+
         try:
             r = requests.post(f"{base_url}/api/chat", json=payload, timeout=_timeout)
             r.raise_for_status()
@@ -162,8 +168,11 @@ def ollama_check(
             return result
 
         except requests.exceptions.Timeout:
+            # Check stop immediately after a timeout — user may have clicked stop
+            if stop_event is not None and stop_event.is_set():
+                return {"skipped": True, "reason": "Stopped by user."}
             if attempt <= _max_retries:
-                wait = attempt * 2   # simple backoff: 2s, 4s, …
+                wait = attempt * 2
                 log.warning("Ollama timeout on attempt %d/%d — retrying in %ds",
                             attempt, _max_retries + 1, wait)
                 import time

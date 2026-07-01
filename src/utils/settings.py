@@ -20,6 +20,7 @@ DEFAULTS: dict = {
     "llm_retries":      2,
     "llm_num_ctx":      1024,
     "llm_num_thread":   0,
+    "skip_key_echo":    True,
 }
 
 
