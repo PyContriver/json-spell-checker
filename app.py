@@ -22,6 +22,7 @@ from src.utils.git import fetch_json_files, list_branches
 from src.utils.logger import get_logger
 from src.utils import settings as _settings
 from src.utils import run_manager as _rm
+from src.utils.report import generate_html
 
 log = get_logger(__name__)
 
@@ -464,6 +465,130 @@ def _render_single_row(row: dict) -> None:
     st.markdown('<hr class="field-div">', unsafe_allow_html=True)
 
 
+def _render_dashboard(all_rows: list[dict], per_file_rows: dict, file_map: dict) -> None:
+    """Unified dashboard: top files, issue breakdown, common issues, quick wins."""
+    from collections import Counter
+
+    # ── Build per-file stats ──────────────────────────────────────────────────
+    file_stats: dict[str, dict] = {}
+    type_counts = Counter()
+    word_counts  = Counter()
+
+    for row in all_rows:
+        fname = row.get("file", "unknown")
+        if fname not in file_stats:
+            file_stats[fname] = {"total": 0, "flagged": 0, "spell": 0, "llm": 0}
+        file_stats[fname]["total"] += 1
+        if row.get("has_issues"):
+            file_stats[fname]["flagged"] += 1
+
+        s_issues = row.get("spell_issues", [])
+        l_result = row.get("llm_result", {})
+
+        if s_issues:
+            file_stats[fname]["spell"] += len(s_issues)
+            for i in s_issues:
+                word_counts[f"{i['word']} → {', '.join(i['suggestions'][:2]) or '?'}"] += 1
+
+        if l_result.get("has_issues") and l_result.get("issues"):
+            file_stats[fname]["llm"] += len(l_result["issues"])
+            for i in l_result["issues"]:
+                t = i.get("type", "spelling")
+                type_counts[t] += 1
+                orig = i.get("original", "").strip()
+                sugg = i.get("suggestion", "").strip()
+                if orig and sugg and orig != sugg:
+                    word_counts[f'"{orig}" → "{sugg}"'] += 1
+
+    sorted_files = sorted(file_stats.items(), key=lambda x: x[1]["flagged"], reverse=True)
+    max_flag     = sorted_files[0][1]["flagged"] if sorted_files else 1
+    quick_wins   = [(f, s) for f, s in sorted_files if 0 < s["flagged"] <= 3]
+
+    # ── Top Affected Files ────────────────────────────────────────────────────
+    st.markdown("### 🏆 Top Affected Files")
+    for fname, stats in sorted_files[:10]:
+        if stats["flagged"] == 0:
+            continue
+        pct     = int(stats["flagged"] / stats["total"] * 100) if stats["total"] else 0
+        bar_pct = int(stats["flagged"] / max_flag * 100)
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:1rem;margin-bottom:6px'>"
+            f"<code style='color:#a5b4fc;min-width:260px;font-size:.8rem'>{fname}</code>"
+            f"<div style='flex:1;background:#1e293b;border-radius:4px;height:10px'>"
+            f"<div style='width:{bar_pct}%;background:#f87171;border-radius:4px;height:10px'></div></div>"
+            f"<span style='color:#f87171;font-weight:700;min-width:30px'>{stats['flagged']}</span>"
+            f"<span style='color:#64748b;font-size:.78rem'>/ {stats['total']} ({pct}%)</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    col1, col2 = st.columns(2)
+
+    # ── Issue Type Breakdown ──────────────────────────────────────────────────
+    with col1:
+        st.markdown("### 📊 Issue Types")
+        total_issues = sum(type_counts.values())
+        for itype, color in [("spelling", "#f87171"), ("grammar", "#fb923c"), ("style", "#a78bfa")]:
+            count = type_counts.get(itype, 0)
+            pct   = int(count / total_issues * 100) if total_issues else 0
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:.8rem;margin-bottom:8px'>"
+                f"<span style='color:{color};font-weight:700;min-width:70px;font-size:.85rem'>"
+                f"{itype.title()}</span>"
+                f"<div style='flex:1;background:#1e293b;border-radius:4px;height:8px'>"
+                f"<div style='width:{pct}%;background:{color};border-radius:4px;height:8px'></div></div>"
+                f"<span style='color:{color};font-weight:700;min-width:35px;text-align:right'>{count}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        if not total_issues:
+            st.caption("No LLM issue types recorded (LLM pass may not have run).")
+
+    # ── Most Common Issues ────────────────────────────────────────────────────
+    with col2:
+        st.markdown("### 🔁 Most Repeated Issues")
+        top_words = word_counts.most_common(8)
+        if top_words:
+            for issue, count in top_words:
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"align-items:center;padding:4px 0;border-bottom:1px solid #1e293b;"
+                    f"font-size:.82rem'>"
+                    f"<span style='color:#e2e8f0;font-family:monospace'>{issue}</span>"
+                    f"<span style='background:#1e293b;color:#94a3b8;padding:1px 8px;"
+                    f"border-radius:999px;font-size:.72rem'>{count}×</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No repeated issues detected.")
+
+    st.markdown("---")
+
+    # ── Quick Wins ────────────────────────────────────────────────────────────
+    if quick_wins:
+        st.markdown("### ⚡ Quick Wins *(files with 1–3 issues — easiest to fix first)*")
+        cols = st.columns(min(len(quick_wins), 4))
+        for col, (fname, stats) in zip(cols, quick_wins[:4]):
+            with col:
+                short = fname.split("/")[-1]   # show just filename
+                st.markdown(
+                    f"<div style='background:#0d2a1a;border:1px solid #166534;"
+                    f"border-radius:8px;padding:.7rem .9rem'>"
+                    f"<div style='font-size:.75rem;color:#4ade80;font-weight:700'>"
+                    f"⚡ {stats['flagged']} issue{'s' if stats['flagged']>1 else ''}</div>"
+                    f"<div style='font-family:monospace;font-size:.78rem;color:#86efac;"
+                    f"margin-top:2px;word-break:break-all'>{short}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        st.markdown("")
+
+    st.markdown("---")
+
+
 def _render_results(ctx: dict) -> None:
     """Render summary cards + per-file tabs from a stored run context."""
     file_map      = ctx["file_map"]
@@ -500,22 +625,39 @@ def _render_results(ctx: dict) -> None:
         st.caption(f"Ignoring {len(ignore_words)} word(s): {', '.join(sorted(ignore_words))}")
 
     st.markdown("---")
+    _render_dashboard(all_rows, per_file_rows, file_map)
     _render_field_rows(per_file_rows, file_map)
 
     # Auto-save
     report_json = json.dumps(all_rows, indent=2, ensure_ascii=False)
+    stamp       = datetime.now().strftime("%Y%m%d_%H%M%S")
     st.markdown("---")
     try:
         reports_dir = Path("reports")
         reports_dir.mkdir(exist_ok=True)
-        stamp       = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = reports_dir / f"{stamp}_report.json"
-        report_path.write_text(report_json, encoding="utf-8")
-        st.success(f"✔ Report auto-saved → `{report_path}`")
+        json_path = reports_dir / f"{stamp}_report.json"
+        html_path = reports_dir / f"{stamp}_report.html"
+        json_path.write_text(report_json, encoding="utf-8")
+        html_content = generate_html(all_rows, {
+            "model":        st.session_state.run_context.get("model", "—") if st.session_state.run_context else "—",
+            "total":        grand_total,
+            "flagged":      grand_flagged,
+            "skipped":      grand_skipped,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        html_path.write_text(html_content, encoding="utf-8")
+        st.success(f"✔ Reports saved → `{json_path.name}` · `{html_path.name}`")
     except Exception as e:
-        st.warning(f"Could not save report to disk: {e}")
-    st.download_button("⬇️  Download JSON Report", data=report_json,
-                       file_name="spell_report.json", mime="application/json")
+        st.warning(f"Could not save reports to disk: {e}")
+        html_content = generate_html(all_rows)
+
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        st.download_button("⬇️  Download JSON Report", data=report_json,
+                           file_name=f"{stamp}_report.json", mime="application/json")
+    with col_dl2:
+        st.download_button("⬇️  Download HTML Report", data=html_content,
+                           file_name=f"{stamp}_report.html", mime="text/html")
 
 
 def _build_context(file_map, file_entries, spell_results, llm_results, ignore_words) -> dict:
@@ -999,9 +1141,24 @@ with tab_reports:
             _render_field_rows(per_file_rows_r, file_map_r, key_prefix="report")
 
             st.markdown("---")
-            st.download_button(
-                "⬇️  Download this report",
-                data=selected_report.read_text(encoding="utf-8"),
-                file_name=selected_report.name,
-                mime="application/json",
-            )
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                st.download_button(
+                    "⬇️  Download JSON",
+                    data=selected_report.read_text(encoding="utf-8"),
+                    file_name=selected_report.name,
+                    mime="application/json",
+                )
+            with col_r2:
+                # Generate HTML on demand for historical reports
+                html_equiv = selected_report.with_suffix(".html")
+                if html_equiv.exists():
+                    html_dl = html_equiv.read_text(encoding="utf-8")
+                else:
+                    html_dl = generate_html(data)
+                st.download_button(
+                    "⬇️  Download HTML",
+                    data=html_dl,
+                    file_name=selected_report.stem + ".html",
+                    mime="text/html",
+                )
